@@ -12,15 +12,19 @@ Windows 向けのゲームパッド操作記録・再生ツールです。
 
 ### 主な機能
 
-- **ボタン操作・待機時間の記録**: XInput（Xbox 互換）および DirectInput（汎用 HID パッド）のボタン・十字キー入力を約 250Hz で記録
-- **テキスト形式での保存・直接編集**: `WAIT` / `PRESS` / `RELEASE` のシンプルな書式（画面内エディタ・メモ帳の両方で編集可能）
+- **ボタン操作・アナログスティック・待機時間の記録**: XInput（Xbox 互換）および DirectInput（汎用 HID パッド）のボタン・十字キー入力を約 250Hz で記録（オプションで左右アナログスティック `LSTICK` / `RSTICK` にも対応）
+- **テキスト形式での保存・直接編集**: `WAIT` / `PRESS` / `RELEASE` / `LSTICK` / `RSTICK` のシンプルな書式（画面内エディタ・メモ帳の両方で編集可能）
+- **未保存変更の検知と確認**: 未保存の変更がある場合はタイトルに `*` を表示し、終了・ファイル切替・新規記録時に保存確認ダイアログを表示
+- **合計所要時間のリアルタイム表示**: エディタ内の `WAIT` を自動集計し、1周および指定回数ループ時の合計所要時間を表示
 - **全 `WAIT` 一括調整**: エディタ内のすべての `WAIT` 秒数を `-0.001` / `+0.001` 秒単位で一括増減（`Ctrl+Z` で元に戻せます）
-- **ループ再生・回数カウントダウン**: 無限ループ（`0`）または指定回数ループに対応。1周完了ごとに残り回数がカウントダウンされ、`0` になるとループ設定も自動解除
+- **ループ再生・回数カウントダウン・開始前待機**: 無限ループ（`0`）または指定回数ループに対応。1周完了ごとに残り回数がカウントダウンされ、`0` になるとループ設定も自動解除。再生前のカウントダウン待機（0〜30秒）も設定可能
 - **ループ時のランダム揺らぎ**: 各 `WAIT` とループ折り返し時に `+0`〜`+指定ms` のプラス方向ランダム遅延を追加可能
+- **グローバルホットキー**: ゲーム画面がアクティブなまま `F9` で再生／停止、`F10` で記録／停止（キー変更・ON/OFF 可能）
+- **10か国語 GUI 対応 & ダークモード**: 日本語 / English / 简体中文 / 繁體中文 / 한국어 / Español / Français / Deutsch / Português / Русский を再起動なしで切替可能。ライト／ダークモード対応
 - **1P 自動入替機能（オプション・要管理者権限）**: 再生中だけ物理パッドを一時無効化して仮想パッドを 1P に割り当て、停止・終了時に物理パッドを 1P に自動復帰
 - **起動時の無効パッド自動検知**: 前回の強制終了などで物理パッドが無効化されたまま残っていた場合、起動時に自動で検知して復帰を案内
 - **自動電源オフ防止**: 無線 Xbox パッドのアイドルスリープを防ぐため、3分ごとに微小な振動信号を送信（ON/OFF 可能）
-- **ウィンドウ状態の自動保存**: 終了時にウィンドウ位置・サイズ・各種オプション・最後に開いたファイルを `window_state.json` へ自動保存
+- **ウィンドウ状態の自動保存**: 終了時にウィンドウ位置・サイズ・各種オプション・言語・テーマ・最後に開いたファイルを `window_state.json` へ自動保存
 
 ### 動作環境
 
@@ -52,11 +56,14 @@ Windows 向けのゲームパッド操作記録・再生ツールです。
 PRESS A
 WAIT 0.100
 RELEASE A
+LSTICK 0.00 1.00
 WAIT 0.500
+LSTICK 0.00 0.00
 ```
 
 使用可能なボタン名:  
-`A`, `B`, `X`, `Y`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `LB`, `RB`, `LT`, `RT`, `LS`, `RS`, `START`, `BACK`（DirectInput 記録時は `BTN1`〜`BTN32`）
+`A`, `B`, `X`, `Y`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `LB`, `RB`, `LT`, `RT`, `LS`, `RS`, `START`, `BACK`（DirectInput 記録時は `BTN1`〜`BTN32`）  
+アナログスティック: `LSTICK <x> <y>` / `RSTICK <x> <y>`（`-1.00` 〜 `1.00`）
 
 ### ⚠️ 注意事項・トラブルシューティング（必ずお読みください）
 
@@ -86,7 +93,7 @@ WAIT 0.500
   - 「自動電源オフ防止」は XInput 振動 API を使用しているため、DirectInput 専用パッドには効きません。
 
 #### 3. アナログスティックについて
-- 記録・再生の対象は **デジタルボタン、十字キー、およびトリガー（LT/RT の ON/OFF 判定）** のみです。アナログスティックの傾き操作は記録されません。
+- 初期設定ではボタンと十字キーのみ記録します。アナログスティックを記録したい場合は **「アナログスティックも記録する (LSTICK / RSTICK)」** にチェックを入れてください（微細なノイズを抑えるためデッドゾーンが適用されます）。
 
 #### 4. 利用規約・免責事項
 - 本ツールは **オフライン環境での検証・個人用途** を想定して作成されています。
@@ -103,15 +110,19 @@ Recorded macros are saved as human-readable plain text (`.txt`) that can be easi
 
 ### Features
 
-- **Button & Timing Recording**: Records button and D-pad inputs from XInput (Xbox-compatible) and DirectInput (generic HID) controllers at ~250 Hz.
-- **Plain-Text Format & Direct Editing**: Uses a simple `WAIT` / `PRESS` / `RELEASE` format editable directly in the app or in Notepad.
+- **Button, Analog Stick & Timing Recording**: Records button and D-pad inputs from XInput (Xbox-compatible) and DirectInput (generic HID) controllers at ~250 Hz, with optional analog stick recording (`LSTICK` / `RSTICK`).
+- **Plain-Text Format & Direct Editing**: Uses a simple `WAIT` / `PRESS` / `RELEASE` / `LSTICK` / `RSTICK` format editable directly in the app or in Notepad.
+- **Unsaved Changes Warning**: Displays `*` in the title bar when modified and prompts to save before closing, loading another file, or starting a new recording.
+- **Live Total Duration Estimate**: Automatically sums all `WAIT` commands and displays both single-loop and total multi-loop durations.
 - **Bulk `WAIT` Adjustment**: Shift all `WAIT` durations in the editor by `-0.001` or `+0.001` seconds at once (supports `Ctrl+Z` undo).
-- **Loop Playback & Countdown**: Supports infinite looping (`0`) or a fixed number of loops. The remaining loop count counts down after each completed cycle and automatically unchecks looping when it reaches `0`.
+- **Loop Playback, Countdown & Start Delay**: Supports infinite looping (`0`) or a fixed count with live countdown (auto-disables looping at `0`), plus an optional pre-playback countdown delay (0–30s).
 - **Random Timing Jitter (Loop Mode)**: Optionally adds a positive random delay (`+0` to `+N ms`) to each `WAIT` and between loop iterations.
+- **Global Hotkeys**: Start/stop playback (`F9`) and recording (`F10`) even while another window is focused (configurable keys and toggleable).
+- **10-Language UI & Dark Mode**: Instant switching across Japanese, English, Simplified/Traditional Chinese, Korean, Spanish, French, German, Portuguese, and Russian, plus Light/Dark themes.
 - **Auto 1P Swap (Optional, Requires Admin)**: Temporarily disables the physical controller during playback so the virtual controller takes Player 1 (slot 0), then automatically restores the physical controller on stop or exit.
 - **Startup Disabled-Pad Detection**: Automatically checks on startup if a physical controller was left disabled (e.g., after a crash or power loss) and offers one-click recovery.
 - **Wireless Auto-Sleep Prevention**: Sends a tiny vibration pulse every 3 minutes to prevent wireless Xbox controllers from powering off while idle (toggleable).
-- **Persistent Window & Settings State**: Automatically saves window position, size, maximized state, options, and the last opened macro file to `window_state.json`.
+- **Persistent Window & Settings State**: Automatically saves window position, size, maximized state, language, theme, options, and the last opened macro file to `window_state.json`.
 
 ### Requirements
 
@@ -143,11 +154,14 @@ Recorded macros are saved as human-readable plain text (`.txt`) that can be easi
 PRESS A
 WAIT 0.100
 RELEASE A
+LSTICK 0.00 1.00
 WAIT 0.500
+LSTICK 0.00 0.00
 ```
 
 Supported button names:  
-`A`, `B`, `X`, `Y`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `LB`, `RB`, `LT`, `RT`, `LS`, `RS`, `START`, `BACK` (`BTN1`–`BTN32` when recording via DirectInput)
+`A`, `B`, `X`, `Y`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `LB`, `RB`, `LT`, `RT`, `LS`, `RS`, `START`, `BACK` (`BTN1`–`BTN32` when recording via DirectInput)  
+Analog sticks: `LSTICK <x> <y>` / `RSTICK <x> <y>` (`-1.00` to `1.00`)
 
 ### ⚠️ Important Notes & Troubleshooting (Please Read)
 
@@ -177,7 +191,7 @@ You can easily restore it using any of the following methods:
   - **Auto-Sleep Prevention** uses the XInput vibration API and does not affect DirectInput-only controllers.
 
 #### 3. Analog Sticks
-- Only **digital buttons, D-pad, and triggers (LT/RT thresholded ON/OFF)** are recorded and played back. Analog stick movements are not recorded.
+- By default, only buttons and D-pad are recorded. Enable **"Record analog sticks (LSTICK / RSTICK)"** if you also want to capture stick movements (a deadzone is applied to reduce noise).
 
 #### 4. Terms of Use & Disclaimer
 - This tool is intended for **offline testing and personal use**.

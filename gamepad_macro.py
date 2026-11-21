@@ -22,6 +22,8 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from i18n import LANG_CODE_TO_LABEL, LANG_LABEL_TO_CODE, LANGUAGES, tr
+
 try:
     import vgamepad as vg
     HAS_VGAMEPAD = True
@@ -215,14 +217,98 @@ DINPUT_TO_XBOX = {
 }
 
 TRIGGER_THRESHOLD = 128  # 0〜255 のうち半分以上でONとみなす
+STICK_DEADZONE = 0.15
+STICK_CHANGE_THRESHOLD = 0.08
+
+HOTKEY_VKS = {
+    "NONE": 0,
+    "F1": 0x70,
+    "F2": 0x71,
+    "F3": 0x72,
+    "F4": 0x73,
+    "F5": 0x74,
+    "F6": 0x75,
+    "F7": 0x76,
+    "F8": 0x77,
+    "F9": 0x78,
+    "F10": 0x79,
+    "F11": 0x7A,
+    "F12": 0x7B,
+    "Pause": 0x13,
+    "ScrollLock": 0x91,
+}
+HOTKEY_NAMES = list(HOTKEY_VKS.keys())
+
+try:
+    _GET_ASYNC_KEY_STATE = ctypes.windll.user32.GetAsyncKeyState
+    _GET_ASYNC_KEY_STATE.argtypes = [ctypes.c_int]
+    _GET_ASYNC_KEY_STATE.restype = ctypes.c_short
+except Exception:
+    _GET_ASYNC_KEY_STATE = None
+
+
+def is_vk_pressed(vk_code):
+    if not vk_code or _GET_ASYNC_KEY_STATE is None:
+        return False
+    try:
+        return bool(_GET_ASYNC_KEY_STATE(vk_code) & 0x8000)
+    except Exception:
+        return False
+
+
+def set_dark_titlebar(window, dark):
+    """Windows 10/11 のウィンドウタイトルバーをダーク/ライトに切り替える（非対応環境では無視）。"""
+    try:
+        window.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        if not hwnd:
+            hwnd = window.winfo_id()
+        val = ctypes.c_int(1 if dark else 0)
+        for attr in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (Win11 / Win10 1903+)
+            res = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)
+            )
+            if res == 0:
+                break
+    except Exception:
+        pass
+
+
+def format_duration(seconds):
+    """秒数を読みやすい形式 (例: 28.50s / 4m 45s / 1h 02m 10s) に整形する。"""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60.0:
+        return f"{seconds:.2f}s"
+    total_sec = int(round(seconds))
+    mins, secs = divmod(total_sec, 60)
+    if mins < 60:
+        return f"{mins}m {secs:02d}s"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h {mins:02d}m {secs:02d}s"
+
+
+def _norm_xinput_axis(raw_val):
+    val = max(-1.0, min(1.0, raw_val / 32767.0))
+    return 0.0 if abs(val) < STICK_DEADZONE else round(val, 2)
+
+
+def _norm_dinput_axis(raw_val, invert=False):
+    val = (raw_val - 32767.5) / 32767.5
+    if invert:
+        val = -val
+    val = max(-1.0, min(1.0, val))
+    return 0.0 if abs(val) < STICK_DEADZONE else round(val, 2)
+
 
 MACRO_HEADER = """# ==========================================
 # ゲームパッド マクロ記録ファイル
 # ==========================================
 # 書式 (メモ帳などで自由に編集・調整できます):
-#   WAIT <秒数>        ... 指定した秒数だけ待機 (例: WAIT 0.500)
-#   PRESS <ボタン名>   ... ボタンを押す (例: PRESS A)
-#   RELEASE <ボタン名> ... ボタンを離す (例: RELEASE A)
+#   WAIT <秒数>            ... 指定した秒数だけ待機 (例: WAIT 0.500)
+#   PRESS <ボタン名>       ... ボタンを押す (例: PRESS A)
+#   RELEASE <ボタン名>     ... ボタンを離す (例: RELEASE A)
+#   LSTICK <x> <y>         ... 左スティック (-1.00〜1.00, 例: LSTICK 0.00 1.00)
+#   RSTICK <x> <y>         ... 右スティック (-1.00〜1.00, 例: RSTICK 0.50 0.00)
 #
 # 使用可能なボタン名:
 #   A, B, X, Y, UP, DOWN, LEFT, RIGHT,
@@ -231,8 +317,8 @@ MACRO_HEADER = """# ==========================================
 """
 
 
-def get_xinput_state(controller_index=0):
-    """指定インデックスのXInputコントローラー状態を取得する。未接続時はNone。"""
+def get_xinput_state_full(controller_index=0):
+    """XInputコントローラーのボタンと左右スティック(-1.0〜1.0)を取得する。未接続時はNone。"""
     if XINPUT_DLL is None:
         return None
     state = XINPUT_STATE()
@@ -248,11 +334,19 @@ def get_xinput_state(controller_index=0):
         pressed.add("LT")
     if gp.bRightTrigger >= TRIGGER_THRESHOLD:
         pressed.add("RT")
-    return pressed
+    ls = (_norm_xinput_axis(gp.sThumbLX), _norm_xinput_axis(gp.sThumbLY))
+    rs = (_norm_xinput_axis(gp.sThumbRX), _norm_xinput_axis(gp.sThumbRY))
+    return pressed, ls, rs
 
 
-def get_directinput_state(joy_index=0):
-    """winmm.dll (DirectInput/HID互換) でコントローラー状態を取得する。未接続時はNone。"""
+def get_xinput_state(controller_index=0):
+    """指定インデックスのXInputコントローラー状態を取得する。未接続時はNone。"""
+    full = get_xinput_state_full(controller_index)
+    return full[0] if full is not None else None
+
+
+def get_directinput_state_full(joy_index=0):
+    """winmm.dll (DirectInput/HID互換) でボタンと左右スティックを取得する。未接続時はNone。"""
     if WINMM_DLL is None:
         return None
     info = JOYINFOEX()
@@ -279,7 +373,37 @@ def get_directinput_state(joy_index=0):
             pressed.add("DOWN")
         if pov in (22500, 27000, 31500):
             pressed.add("LEFT")
-    return pressed
+
+    ls = (_norm_dinput_axis(info.dwXpos, False), _norm_dinput_axis(info.dwYpos, True))
+    rs = (_norm_dinput_axis(info.dwZpos, False), _norm_dinput_axis(info.dwRpos, True))
+    return pressed, ls, rs
+
+
+def get_directinput_state(joy_index=0):
+    """winmm.dll (DirectInput/HID互換) でコントローラー状態を取得する。未接続時はNone。"""
+    full = get_directinput_state_full(joy_index)
+    return full[0] if full is not None else None
+
+
+def get_controller_state_full(controller_index=0, mode="AUTO"):
+    """
+    指定モードでコントローラー状態（ボタン + 左右スティック）を取得する。
+    戻り値: (pressed_set, ls, rs, detected_type) または (None, None, None, None)
+    """
+    if mode == "XInput":
+        f = get_xinput_state_full(controller_index)
+        return (f[0], f[1], f[2], "XInput") if f is not None else (None, None, None, None)
+    if mode == "DirectInput":
+        f = get_directinput_state_full(controller_index)
+        return (f[0], f[1], f[2], "DirectInput") if f is not None else (None, None, None, None)
+
+    f = get_xinput_state_full(controller_index)
+    if f is not None:
+        return f[0], f[1], f[2], "XInput"
+    f = get_directinput_state_full(controller_index)
+    if f is not None:
+        return f[0], f[1], f[2], "DirectInput"
+    return None, None, None, None
 
 
 def get_controller_state(controller_index=0, mode="AUTO"):
@@ -287,21 +411,8 @@ def get_controller_state(controller_index=0, mode="AUTO"):
     指定モードでコントローラー状態を取得する。
     戻り値: (pressed_set, detected_type) または (None, None)
     """
-    if mode == "XInput":
-        s = get_xinput_state(controller_index)
-        return (s, "XInput") if s is not None else (None, None)
-    if mode == "DirectInput":
-        s = get_directinput_state(controller_index)
-        return (s, "DirectInput") if s is not None else (None, None)
-
-    # AUTO: まず XInput を確認し、未接続なら DirectInput を確認
-    s = get_xinput_state(controller_index)
-    if s is not None:
-        return s, "XInput"
-    s = get_directinput_state(controller_index)
-    if s is not None:
-        return s, "DirectInput"
-    return None, None
+    pressed, _, _, detected = get_controller_state_full(controller_index, mode)
+    return (pressed, detected) if pressed is not None else (None, None)
 
 
 def parse_macro_text(text):
@@ -320,23 +431,34 @@ def parse_macro_text(text):
         cmd = parts[0].upper()
         if cmd == "WAIT":
             if len(parts) != 2:
-                raise ValueError(f"{line_num}行目: WAIT の形式が不正です -> {raw_line}")
+                raise ValueError(f"Line {line_num}: Invalid WAIT format -> {raw_line}")
             try:
                 sec = float(parts[1])
                 if sec < 0:
                     raise ValueError
             except ValueError:
-                raise ValueError(f"{line_num}行目: WAIT の秒数が不正です -> {parts[1]}")
+                raise ValueError(f"Line {line_num}: Invalid WAIT seconds -> {parts[1]}")
             commands.append((line_num, "WAIT", sec))
         elif cmd in ("PRESS", "RELEASE"):
             if len(parts) != 2:
-                raise ValueError(f"{line_num}行目: {cmd} の形式が不正です -> {raw_line}")
+                raise ValueError(f"Line {line_num}: Invalid {cmd} format -> {raw_line}")
             btn = parts[1].upper()
             if btn not in valid_buttons:
-                raise ValueError(f"{line_num}行目: 未知のボタン名です -> {btn}")
+                raise ValueError(f"Line {line_num}: Unknown button -> {btn}")
             commands.append((line_num, cmd, btn))
+        elif cmd in ("LSTICK", "RSTICK"):
+            if len(parts) != 3:
+                raise ValueError(f"Line {line_num}: Invalid {cmd} format (expected X Y) -> {raw_line}")
+            try:
+                x = float(parts[1])
+                y = float(parts[2])
+                if not (-1.0 <= x <= 1.0 and -1.0 <= y <= 1.0):
+                    raise ValueError
+            except ValueError:
+                raise ValueError(f"Line {line_num}: {cmd} values must be between -1.0 and 1.0 -> {raw_line}")
+            commands.append((line_num, cmd, (x, y)))
         else:
-            raise ValueError(f"{line_num}行目: 未知のコマンドです -> {cmd}")
+            raise ValueError(f"Line {line_num}: Unknown command -> {cmd}")
     return commands
 
 
@@ -532,17 +654,19 @@ class GamepadMacroApp:
     def __init__(self, root):
         self.root = root
         self.is_admin_user = is_admin()
-        admin_tag = " [管理者]" if self.is_admin_user else " [一般権限]"
-        self.root.title("ゲームパッド マクロ記録・再生ツール" + admin_tag)
-        self.root.geometry("700x610")
-        self.root.minsize(620, 520)
+        self.lang = "ja"
+        self.dark_mode_var = tk.BooleanVar(value=False)
+
+        self.root.geometry("760x690")
+        self.root.minsize(680, 580)
 
         self.is_recording = False
         self.is_playing = False
         self.stop_event = threading.Event()
         self._closing_event = threading.Event()
         self.current_file = os.path.join(os.getcwd(), "macro_record.txt")
-        self._last_normal_geometry = "700x610"
+        self._last_normal_geometry = "760x690"
+        self._saved_content = MACRO_HEADER + "\n"
 
         self.gamepad_out = None
         self.vgamepad_error = None
@@ -553,20 +677,236 @@ class GamepadMacroApp:
         self._active_worker = None
         self._keep_awake_flag = True
 
+        # バックグラウンドのホットキー監視用スレッドセーフ設定
+        self._hk_lock = threading.Lock()
+        self._hk_enabled = True
+        self._hk_play_vk = HOTKEY_VKS["F9"]
+        self._hk_rec_vk = HOTKEY_VKS["F10"]
+
+        self.style = ttk.Style(self.root)
+        try:
+            self.style.theme_use("clam")
+        except Exception:
+            pass
+
         self._build_ui()
         self._load_window_state()
+        self._apply_language()
+        self._apply_theme()
+        self._sync_hotkey_config()
+        self._update_duration_label()
+        self._update_window_title()
+
         self.root.bind("<Configure>", self._on_window_configure)
         self._init_vgamepad()
         self._drain_ui_queue()
         self._poll_controller_status()
         self._on_toggle_keep_awake()
         threading.Thread(target=self._keepalive_worker, daemon=True).start()
+        threading.Thread(target=self._hotkey_worker, daemon=True).start()
         threading.Thread(target=self._check_disabled_pads_on_startup, daemon=True).start()
 
         # 異常終了時も含め、無効化した物理パッドを必ず元に戻す
         atexit.register(self._restore_physical_1p)
         atexit.register(lambda: set_system_keep_awake(False))
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _t(self, key, **kwargs):
+        return tr(self.lang, key, **kwargs)
+
+    def _is_dirty(self):
+        try:
+            return self.text_area.get("1.0", "end-1c") != self._saved_content.rstrip("\n")
+        except Exception:
+            return False
+
+    def _mark_saved(self):
+        self._saved_content = self.text_area.get("1.0", "end-1c")
+        self._update_window_title()
+
+    def _update_window_title(self):
+        tag = self._t("admin_tag") if self.is_admin_user else self._t("user_tag")
+        dirty = " *" if self._is_dirty() else ""
+        self.root.title(self._t("app_title") + tag + dirty)
+
+    def _apply_theme(self):
+        dark = bool(self.dark_mode_var.get())
+        if dark:
+            bg = "#1e1e1e"
+            panel = "#252526"
+            field = "#2d2d30"
+            fg = "#e6e6e6"
+            muted = "#aaaaaa"
+            border = "#3e3e42"
+            btn_bg = "#333337"
+            btn_active = "#44444a"
+            sel_bg = "#264f78"
+            hl_bg = "#665200"
+            hl_fg = "#ffffff"
+        else:
+            bg = "#f0f0f0"
+            panel = "#f0f0f0"
+            field = "#ffffff"
+            fg = "#111111"
+            muted = "#555555"
+            border = "#c8c8c8"
+            btn_bg = "#e4e4e4"
+            btn_active = "#d4d4d4"
+            sel_bg = "#cce8ff"
+            hl_bg = "#ffe066"
+            hl_fg = "#000000"
+
+        self.root.configure(bg=bg)
+        self.style.configure(".", background=panel, foreground=fg, bordercolor=border)
+        self.style.configure("TFrame", background=panel)
+        self.style.configure("TLabel", background=panel, foreground=fg)
+        self.style.configure("Muted.TLabel", background=panel, foreground=muted)
+        self.style.configure("TLabelframe", background=panel, foreground=fg, bordercolor=border)
+        self.style.configure("TLabelframe.Label", background=panel, foreground=fg)
+        self.style.configure("TCheckbutton", background=panel, foreground=fg)
+        self.style.map("TCheckbutton", background=[("active", panel)], foreground=[("disabled", muted)])
+        self.style.configure("TButton", background=btn_bg, foreground=fg, bordercolor=border)
+        self.style.map(
+            "TButton",
+            background=[("active", btn_active), ("disabled", panel)],
+            foreground=[("disabled", muted)],
+        )
+        self.style.configure(
+            "TCombobox",
+            fieldbackground=field,
+            background=btn_bg,
+            foreground=fg,
+            arrowcolor=fg,
+            bordercolor=border,
+        )
+        self.style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", field), ("disabled", panel)],
+            foreground=[("readonly", fg), ("disabled", muted)],
+        )
+        self.style.configure(
+            "TSpinbox",
+            fieldbackground=field,
+            background=btn_bg,
+            foreground=fg,
+            arrowcolor=fg,
+            bordercolor=border,
+        )
+        self.style.map(
+            "TSpinbox",
+            fieldbackground=[("disabled", panel)],
+            foreground=[("disabled", muted)],
+        )
+        self.style.configure("Vertical.TScrollbar", background=btn_bg, troughcolor=bg, arrowcolor=fg)
+
+        self.text_area.configure(
+            bg=field,
+            fg=fg,
+            insertbackground=fg,
+            selectbackground=sel_bg,
+            selectforeground=fg,
+        )
+        self.text_area.tag_configure(
+            "current_line",
+            background=hl_bg,
+            foreground=hl_fg,
+            font=("Consolas", 10, "bold"),
+        )
+        if not self.is_playing and not self.is_recording:
+            self.state_label.config(foreground=muted)
+        set_dark_titlebar(self.root, dark)
+
+    def _on_language_selected(self, _event=None):
+        label = self.lang_combo_var.get()
+        code = LANG_LABEL_TO_CODE.get(label, "ja")
+        if code != self.lang:
+            self.lang = code
+            self._apply_language()
+
+    def _apply_language(self):
+        self._update_window_title()
+        self.lbl_lang.config(text=self._t("lang_label"))
+        self.chk_dark.config(text=self._t("dark_mode"))
+        self.status_frame.config(text=self._t("status_frame"))
+        self.lbl_port.config(text=self._t("port_label"))
+        self.lbl_mode.config(text=self._t("mode_label"))
+        self.chk_keep_awake.config(text=self._t("keep_awake"))
+
+        self.ctrl_frame.config(text=self._t("ctrl_frame"))
+        self.btn_record.config(text=self._t("btn_record"))
+        self.btn_stop.config(text=self._t("btn_stop"))
+        self.btn_play.config(text=self._t("btn_play"))
+        self.chk_loop.config(text=self._t("loop_play"))
+        self.lbl_loop_count.config(text=self._t("loop_count_label"))
+        self.lbl_countdown.config(text=self._t("countdown_label"))
+        self.chk_wait_first.config(text=self._t("wait_first"))
+        self.chk_record_sticks.config(text=self._t("record_sticks"))
+        self.chk_auto_swap.config(text=self._t("auto_swap"))
+        self.btn_restore_pad.config(text=self._t("btn_restore_pad"))
+        self.chk_jitter.config(text=self._t("jitter_enable"))
+        self.lbl_jitter_ms.config(text=self._t("jitter_ms_label"))
+        self.chk_hotkey.config(text=self._t("hotkey_enable"))
+        self.lbl_hk_play.config(text=self._t("hk_play_label"))
+        self.lbl_hk_rec.config(text=self._t("hk_rec_label"))
+
+        self.file_frame.config(text=self._t("file_frame"))
+        self.btn_open.config(text=self._t("btn_open"))
+        self.btn_save.config(text=self._t("btn_save"))
+        self.btn_save_as.config(text=self._t("btn_save_as"))
+        self.btn_notepad.config(text=self._t("btn_notepad"))
+        self.file_label.config(text=self._t("current_file", path=self.current_file))
+
+        self.editor_frame.config(text=self._t("editor_frame"))
+        self.chk_auto_scroll.config(text=self._t("auto_scroll"))
+        self.lbl_bulk_wait.config(text=self._t("bulk_wait_label"))
+
+        if not self.is_playing and not self.is_recording:
+            self.state_label.config(text=self._t("idle"))
+        self._update_duration_label()
+
+    def _sync_hotkey_config(self, _event=None):
+        with self._hk_lock:
+            self._hk_enabled = bool(self.hotkey_var.get())
+            self._hk_play_vk = HOTKEY_VKS.get(self.hk_play_var.get(), 0)
+            self._hk_rec_vk = HOTKEY_VKS.get(self.hk_rec_var.get(), 0)
+        state = "readonly" if self.hotkey_var.get() else "disabled"
+        if not (self.is_playing or self.is_recording):
+            self.hk_play_combo.config(state=state)
+            self.hk_rec_combo.config(state=state)
+
+    def _hotkey_worker(self):
+        """バックグラウンドでグローバルホットキーの押下エッジを監視する。"""
+        prev_play = False
+        prev_rec = False
+        while not self._closing_event.wait(0.03):
+            with self._hk_lock:
+                enabled = self._hk_enabled
+                play_vk = self._hk_play_vk
+                rec_vk = self._hk_rec_vk
+            if not enabled:
+                prev_play = False
+                prev_rec = False
+                continue
+            cur_play = is_vk_pressed(play_vk)
+            cur_rec = is_vk_pressed(rec_vk)
+            if cur_play and not prev_play:
+                self._post_ui(self._on_hotkey_play)
+            elif cur_rec and not prev_rec:
+                self._post_ui(self._on_hotkey_record)
+            prev_play = cur_play
+            prev_rec = cur_rec
+
+    def _on_hotkey_play(self):
+        if self.is_playing:
+            self.stop_all()
+        elif not self.is_recording:
+            self.start_playing()
+
+    def _on_hotkey_record(self):
+        if self.is_recording:
+            self.stop_all()
+        elif not self.is_playing:
+            self.start_recording()
 
     def _check_disabled_pads_on_startup(self):
         """起動時に無効化されたままの物理パッドが残っていないか確認し、あれば復帰を案内する。"""
@@ -582,17 +922,14 @@ class GamepadMacroApp:
                 return
             if self.is_admin_user:
                 if messagebox.askyesno(
-                    "無効な物理パッドを検出",
-                    "前回の強制終了などで無効化されたままの物理コントローラーが見つかりました。\n"
-                    "今すぐ有効化（復帰）しますか？",
+                    self._t("startup_disabled_title"),
+                    self._t("startup_disabled_admin"),
                 ):
                     self.manual_restore_physical_pad()
             else:
                 messagebox.showwarning(
-                    "無効な物理パッドを検出",
-                    "無効化されたままの物理コントローラーが見つかりました。\n\n"
-                    "start_macro.bat から管理者権限で起動し直し、\n"
-                    "「🔄 物理パッドを戻す」ボタンで復帰してください。",
+                    self._t("startup_disabled_title"),
+                    self._t("startup_disabled_user"),
                 )
 
         self._post_ui(_prompt)
@@ -632,6 +969,14 @@ class GamepadMacroApp:
         except Exception:
             return
 
+        lang = data.get("lang")
+        if lang in LANG_CODE_TO_LABEL:
+            self.lang = lang
+            self.lang_combo_var.set(LANG_CODE_TO_LABEL[lang])
+
+        if isinstance(data.get("dark_mode"), bool):
+            self.dark_mode_var.set(data["dark_mode"])
+
         geom = data.get("geometry")
         if isinstance(geom, str) and geom:
             try:
@@ -657,6 +1002,12 @@ class GamepadMacroApp:
         if isinstance(data.get("loop"), bool):
             self.loop_var.set(data["loop"])
             self._on_toggle_loop()
+        if isinstance(data.get("countdown"), str):
+            try:
+                if float(data["countdown"]) >= 0:
+                    self.countdown_var.set(data["countdown"])
+            except ValueError:
+                pass
         if isinstance(data.get("jitter_ms"), str) and data["jitter_ms"].isdigit():
             self.jitter_ms_var.set(data["jitter_ms"])
         if isinstance(data.get("jitter"), bool):
@@ -664,21 +1015,30 @@ class GamepadMacroApp:
             self._on_toggle_jitter()
         if isinstance(data.get("wait_first"), bool):
             self.wait_first_var.set(data["wait_first"])
+        if isinstance(data.get("record_sticks"), bool):
+            self.record_sticks_var.set(data["record_sticks"])
         if isinstance(data.get("auto_swap"), bool):
             self.auto_swap_var.set(data["auto_swap"])
         if isinstance(data.get("auto_scroll"), bool):
             self.auto_scroll_var.set(data["auto_scroll"])
+        if isinstance(data.get("hotkey_enabled"), bool):
+            self.hotkey_var.set(data["hotkey_enabled"])
+        if data.get("hk_play") in HOTKEY_VKS:
+            self.hk_play_var.set(data["hk_play"])
+        if data.get("hk_rec") in HOTKEY_VKS:
+            self.hk_rec_var.set(data["hk_rec"])
 
         saved_file = data.get("current_file")
         if isinstance(saved_file, str) and saved_file:
             self.current_file = saved_file
-            self.file_label.config(text=f"現在のファイル: {self.current_file}")
+            self.file_label.config(text=self._t("current_file", path=self.current_file))
             if os.path.isfile(saved_file):
                 try:
                     with open(saved_file, "r", encoding="utf-8") as f:
                         content = f.read()
                     self.text_area.delete("1.0", tk.END)
                     self.text_area.insert("1.0", content)
+                    self._saved_content = self.text_area.get("1.0", "end-1c")
                 except OSError:
                     pass
 
@@ -689,6 +1049,8 @@ class GamepadMacroApp:
             if win_state == "normal":
                 self._last_normal_geometry = self.root.geometry()
             data = {
+                "lang": self.lang,
+                "dark_mode": bool(self.dark_mode_var.get()),
                 "geometry": self._last_normal_geometry,
                 "window_state": "zoomed" if win_state == "zoomed" else "normal",
                 "port": int(self.port_var.get()),
@@ -696,11 +1058,16 @@ class GamepadMacroApp:
                 "keep_awake": bool(self.keep_awake_var.get()),
                 "loop": bool(self.loop_var.get()),
                 "loop_count": self.loop_count_var.get().strip(),
+                "countdown": self.countdown_var.get().strip(),
                 "jitter": bool(self.jitter_var.get()),
                 "jitter_ms": self.jitter_ms_var.get().strip(),
                 "wait_first": bool(self.wait_first_var.get()),
+                "record_sticks": bool(self.record_sticks_var.get()),
                 "auto_swap": bool(self.auto_swap_var.get()),
                 "auto_scroll": bool(self.auto_scroll_var.get()),
+                "hotkey_enabled": bool(self.hotkey_var.get()),
+                "hk_play": self.hk_play_var.get(),
+                "hk_rec": self.hk_rec_var.get(),
                 "current_file": self.current_file,
             }
             with open(STATE_FILE, "w", encoding="utf-8") as f:
@@ -710,7 +1077,7 @@ class GamepadMacroApp:
 
     def _init_vgamepad(self):
         if not HAS_VGAMEPAD:
-            self.vgamepad_error = "vgamepad ライブラリがインストールされていません。"
+            self.vgamepad_error = self._t("err_no_vgamepad")
             return
         # 自動入替がOFFのときだけ常時接続にする（ONのときは再生時だけ仮想パッドを接続）
         if not self.auto_swap_var.get():
@@ -718,7 +1085,7 @@ class GamepadMacroApp:
 
     def _connect_virtual_gamepad(self):
         if not HAS_VGAMEPAD:
-            self.vgamepad_error = "vgamepad ライブラリがインストールされていません。"
+            self.vgamepad_error = self._t("err_no_vgamepad")
             return False
         with self._vgamepad_lock:
             if self.gamepad_out is not None:
@@ -728,11 +1095,7 @@ class GamepadMacroApp:
                 self.vgamepad_error = None
                 return True
             except Exception as e:
-                self.vgamepad_error = (
-                    "仮想コントローラー (ViGEmBus) を初期化できませんでした。\n"
-                    "再生機能を使うには ViGEmBus ドライバのインストールが必要です。\n"
-                    f"詳細: {e}"
-                )
+                self.vgamepad_error = self._t("err_vgamepad_init", err=e)
                 return False
 
     def _disconnect_virtual_gamepad(self):
@@ -746,23 +1109,50 @@ class GamepadMacroApp:
                 gc.collect()
 
     def _build_ui(self):
-        pad = {"padx": 10, "pady": 6}
+        pad = {"padx": 10, "pady": 4}
+
+        # ヘッダーバー（言語・ダークモード切替）
+        header_bar = ttk.Frame(self.root)
+        header_bar.pack(fill="x", padx=10, pady=(6, 0))
+
+        self.lbl_lang = ttk.Label(header_bar, text="言語:")
+        self.lbl_lang.pack(side="left")
+        self.lang_combo_var = tk.StringVar(value=LANG_CODE_TO_LABEL[self.lang])
+        self.lang_combo = ttk.Combobox(
+            header_bar,
+            textvariable=self.lang_combo_var,
+            values=[label for _, label in LANGUAGES],
+            width=12,
+            state="readonly",
+        )
+        self.lang_combo.pack(side="left", padx=(4, 12))
+        self.lang_combo.bind("<<ComboboxSelected>>", self._on_language_selected)
+
+        self.chk_dark = ttk.Checkbutton(
+            header_bar,
+            text="🌙 ダークモード",
+            variable=self.dark_mode_var,
+            command=self._apply_theme,
+        )
+        self.chk_dark.pack(side="right")
 
         # ステータスバー（上部）
-        status_frame = ttk.LabelFrame(self.root, text="コントローラー状態", padding=8)
-        status_frame.pack(fill="x", **pad)
+        self.status_frame = ttk.LabelFrame(self.root, text="コントローラー状態", padding=6)
+        self.status_frame.pack(fill="x", **pad)
 
-        top_row = ttk.Frame(status_frame)
+        top_row = ttk.Frame(self.status_frame)
         top_row.pack(fill="x")
 
-        ttk.Label(top_row, text="入力ポート:").pack(side="left")
+        self.lbl_port = ttk.Label(top_row, text="入力ポート:")
+        self.lbl_port.pack(side="left")
         self.port_var = tk.IntVar(value=0)
         port_combo = ttk.Combobox(
             top_row, textvariable=self.port_var, values=list(range(16)), width=4, state="readonly"
         )
         port_combo.pack(side="left", padx=(4, 10))
 
-        ttk.Label(top_row, text="方式:").pack(side="left")
+        self.lbl_mode = ttk.Label(top_row, text="方式:")
+        self.lbl_mode.pack(side="left")
         self.mode_var = tk.StringVar(value="AUTO")
         mode_combo = ttk.Combobox(
             top_row,
@@ -776,25 +1166,26 @@ class GamepadMacroApp:
         self.conn_label = ttk.Label(top_row, text="確認中...", font=("Meiryo", 9, "bold"))
         self.conn_label.pack(side="left")
 
-        self.state_label = ttk.Label(top_row, text="待機中", foreground="gray")
+        self.state_label = ttk.Label(top_row, text="待機中", style="Muted.TLabel")
         self.state_label.pack(side="right")
 
-        keep_row = ttk.Frame(status_frame)
-        keep_row.pack(fill="x", pady=(6, 0))
+        keep_row = ttk.Frame(self.status_frame)
+        keep_row.pack(fill="x", pady=(4, 0))
 
         self.keep_awake_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
+        self.chk_keep_awake = ttk.Checkbutton(
             keep_row,
             text="起動中は物理パッドの自動電源オフを防止（3分ごとに微小信号を送信）",
             variable=self.keep_awake_var,
             command=self._on_toggle_keep_awake,
-        ).pack(side="left")
+        )
+        self.chk_keep_awake.pack(side="left")
 
         # 操作ボタンエリア
-        ctrl_frame = ttk.LabelFrame(self.root, text="記録・再生コントロール", padding=8)
-        ctrl_frame.pack(fill="x", **pad)
+        self.ctrl_frame = ttk.LabelFrame(self.root, text="記録・再生コントロール", padding=6)
+        self.ctrl_frame.pack(fill="x", **pad)
 
-        btn_row1 = ttk.Frame(ctrl_frame)
+        btn_row1 = ttk.Frame(self.ctrl_frame)
         btn_row1.pack(fill="x", pady=(0, 6))
 
         self.btn_record = tk.Button(
@@ -802,8 +1193,8 @@ class GamepadMacroApp:
             text="● 記録開始 (Record)",
             bg="#d9534f",
             fg="white",
-            font=("Meiryo", 10, "bold"),
-            width=18,
+            font=("Meiryo", 9, "bold"),
+            width=16,
             command=self.start_recording,
         )
         self.btn_record.pack(side="left", padx=(0, 6))
@@ -813,65 +1204,91 @@ class GamepadMacroApp:
             text="■ 停止 (Stop)",
             bg="#5a6268",
             fg="white",
-            font=("Meiryo", 10, "bold"),
-            width=13,
+            font=("Meiryo", 9, "bold"),
+            width=11,
             state="disabled",
             command=self.stop_all,
         )
-        self.btn_stop.pack(side="left", padx=(0, 10))
+        self.btn_stop.pack(side="left", padx=(0, 8))
 
         self.btn_play = tk.Button(
             btn_row1,
             text="▶ 再生 (Play)",
             bg="#28a745",
             fg="white",
-            font=("Meiryo", 10, "bold"),
-            width=16,
+            font=("Meiryo", 9, "bold"),
+            width=14,
             command=self.start_playing,
         )
         self.btn_play.pack(side="left", padx=(0, 8))
 
         self.loop_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.chk_loop = ttk.Checkbutton(
             btn_row1,
             text="ループ再生",
             variable=self.loop_var,
             command=self._on_toggle_loop,
-        ).pack(side="left", padx=(2, 4))
+        )
+        self.chk_loop.pack(side="left", padx=(2, 4))
 
-        ttk.Label(btn_row1, text="回数(0=無限):").pack(side="left")
+        self.lbl_loop_count = ttk.Label(btn_row1, text="回数(0=無限):")
+        self.lbl_loop_count.pack(side="left")
         self.loop_count_var = tk.StringVar(value="0")
+        self.loop_count_var.trace_add("write", lambda *_: self._update_duration_label())
         self.loop_count_spin = ttk.Spinbox(
             btn_row1,
             from_=0,
             to=99999,
             textvariable=self.loop_count_var,
-            width=6,
+            width=5,
             state="disabled",
         )
-        self.loop_count_spin.pack(side="left", padx=(4, 0))
+        self.loop_count_spin.pack(side="left", padx=(3, 8))
 
-        # オプション行
-        btn_row2 = ttk.Frame(ctrl_frame)
+        self.lbl_countdown = ttk.Label(btn_row1, text="開始待機(秒):")
+        self.lbl_countdown.pack(side="left")
+        self.countdown_var = tk.StringVar(value="0")
+        self.countdown_spin = ttk.Spinbox(
+            btn_row1,
+            from_=0,
+            to=30,
+            textvariable=self.countdown_var,
+            width=4,
+        )
+        self.countdown_spin.pack(side="left", padx=(3, 0))
+
+        # オプション行2: 記録設定
+        btn_row2 = ttk.Frame(self.ctrl_frame)
         btn_row2.pack(fill="x")
 
         self.wait_first_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
+        self.chk_wait_first = ttk.Checkbutton(
             btn_row2,
             text="最初のボタンが押された瞬間から記録する（冒頭の無操作時間をカット）",
             variable=self.wait_first_var,
-        ).pack(side="left")
+        )
+        self.chk_wait_first.pack(side="left")
 
-        btn_row3 = ttk.Frame(ctrl_frame)
+        self.record_sticks_var = tk.BooleanVar(value=False)
+        self.chk_record_sticks = ttk.Checkbutton(
+            btn_row2,
+            text="アナログスティックも記録する (LSTICK / RSTICK)",
+            variable=self.record_sticks_var,
+        )
+        self.chk_record_sticks.pack(side="right")
+
+        # オプション行3: 1P自動入替
+        btn_row3 = ttk.Frame(self.ctrl_frame)
         btn_row3.pack(fill="x", pady=(4, 0))
 
         self.auto_swap_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.chk_auto_swap = ttk.Checkbutton(
             btn_row3,
             text="再生時だけ物理パッドと1Pを自動入替（停止で元に戻す・要管理者権限）",
             variable=self.auto_swap_var,
             command=self._on_toggle_auto_swap,
-        ).pack(side="left")
+        )
+        self.chk_auto_swap.pack(side="left")
 
         self.btn_restore_pad = ttk.Button(
             btn_row3,
@@ -880,18 +1297,21 @@ class GamepadMacroApp:
         )
         self.btn_restore_pad.pack(side="right")
 
-        btn_row4 = ttk.Frame(ctrl_frame)
+        # オプション行4: ランダム揺らぎ + グローバルホットキー
+        btn_row4 = ttk.Frame(self.ctrl_frame)
         btn_row4.pack(fill="x", pady=(4, 0))
 
         self.jitter_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.chk_jitter = ttk.Checkbutton(
             btn_row4,
             text="ループ時にタイミングを少しずらす（ランダム揺らぎ）",
             variable=self.jitter_var,
             command=self._on_toggle_jitter,
-        ).pack(side="left")
+        )
+        self.chk_jitter.pack(side="left")
 
-        ttk.Label(btn_row4, text="追加幅(+ms):").pack(side="left", padx=(10, 0))
+        self.lbl_jitter_ms = ttk.Label(btn_row4, text="追加幅(+ms):")
+        self.lbl_jitter_ms.pack(side="left", padx=(8, 0))
         self.jitter_ms_var = tk.StringVar(value="30")
         self.jitter_ms_spin = ttk.Spinbox(
             btn_row4,
@@ -904,34 +1324,80 @@ class GamepadMacroApp:
         )
         self.jitter_ms_spin.pack(side="left", padx=(4, 0))
 
-        # ファイル操作エリア
-        file_frame = ttk.LabelFrame(self.root, text="マクロファイル操作（メモ帳などで編集可能）", padding=8)
-        file_frame.pack(fill="x", **pad)
+        btn_row5 = ttk.Frame(self.ctrl_frame)
+        btn_row5.pack(fill="x", pady=(4, 0))
 
-        file_row = ttk.Frame(file_frame)
+        self.hotkey_var = tk.BooleanVar(value=True)
+        self.chk_hotkey = ttk.Checkbutton(
+            btn_row5,
+            text="グローバルホットキー",
+            variable=self.hotkey_var,
+            command=self._sync_hotkey_config,
+        )
+        self.chk_hotkey.pack(side="left")
+
+        self.lbl_hk_play = ttk.Label(btn_row5, text="再生/停止:")
+        self.lbl_hk_play.pack(side="left", padx=(10, 0))
+        self.hk_play_var = tk.StringVar(value="F9")
+        self.hk_play_combo = ttk.Combobox(
+            btn_row5,
+            textvariable=self.hk_play_var,
+            values=HOTKEY_NAMES,
+            width=10,
+            state="readonly",
+        )
+        self.hk_play_combo.pack(side="left", padx=(4, 10))
+        self.hk_play_combo.bind("<<ComboboxSelected>>", self._sync_hotkey_config)
+
+        self.lbl_hk_rec = ttk.Label(btn_row5, text="記録/停止:")
+        self.lbl_hk_rec.pack(side="left")
+        self.hk_rec_var = tk.StringVar(value="F10")
+        self.hk_rec_combo = ttk.Combobox(
+            btn_row5,
+            textvariable=self.hk_rec_var,
+            values=HOTKEY_NAMES,
+            width=10,
+            state="readonly",
+        )
+        self.hk_rec_combo.pack(side="left", padx=(4, 0))
+        self.hk_rec_combo.bind("<<ComboboxSelected>>", self._sync_hotkey_config)
+
+        # ファイル操作エリア
+        self.file_frame = ttk.LabelFrame(self.root, text="マクロファイル操作（メモ帳などで編集可能）", padding=6)
+        self.file_frame.pack(fill="x", **pad)
+
+        file_row = ttk.Frame(self.file_frame)
         file_row.pack(fill="x")
 
-        ttk.Button(file_row, text="📂 ファイルを開く", command=self.load_file).pack(side="left", padx=(0, 6))
-        ttk.Button(file_row, text="💾 保存する", command=self.save_file).pack(side="left", padx=(0, 6))
-        ttk.Button(file_row, text="💾 名前を付けて保存", command=self.save_file_as).pack(side="left", padx=(0, 6))
-        ttk.Button(file_row, text="📝 メモ帳で開く", command=self.open_in_notepad).pack(side="left", padx=(12, 0))
+        self.btn_open = ttk.Button(file_row, text="📂 ファイルを開く", command=self.load_file)
+        self.btn_open.pack(side="left", padx=(0, 6))
+        self.btn_save = ttk.Button(file_row, text="💾 保存する", command=self.save_file)
+        self.btn_save.pack(side="left", padx=(0, 6))
+        self.btn_save_as = ttk.Button(file_row, text="💾 名前を付けて保存", command=self.save_file_as)
+        self.btn_save_as.pack(side="left", padx=(0, 6))
+        self.btn_notepad = ttk.Button(file_row, text="📝 メモ帳で開く", command=self.open_in_notepad)
+        self.btn_notepad.pack(side="left", padx=(12, 0))
 
-        self.file_label = ttk.Label(file_frame, text=f"現在のファイル: {self.current_file}", foreground="#555")
-        self.file_label.pack(anchor="w", pady=(6, 0))
+        self.file_label = ttk.Label(self.file_frame, text=f"現在のファイル: {self.current_file}", style="Muted.TLabel")
+        self.file_label.pack(anchor="w", pady=(4, 0))
 
         # テキストエディタエリア
-        editor_frame = ttk.LabelFrame(self.root, text="記録内容プレビュー / 直接編集", padding=8)
-        editor_frame.pack(fill="both", expand=True, **pad)
+        self.editor_frame = ttk.LabelFrame(self.root, text="記録内容プレビュー / 直接編集", padding=6)
+        self.editor_frame.pack(fill="both", expand=True, **pad)
 
-        editor_top = ttk.Frame(editor_frame)
+        editor_top = ttk.Frame(self.editor_frame)
         editor_top.pack(fill="x", pady=(0, 4))
 
         self.auto_scroll_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
+        self.chk_auto_scroll = ttk.Checkbutton(
             editor_top,
             text="再生・記録中の自動スクロール",
             variable=self.auto_scroll_var,
-        ).pack(side="left")
+        )
+        self.chk_auto_scroll.pack(side="left")
+
+        self.duration_label = ttk.Label(editor_top, text="", style="Muted.TLabel")
+        self.duration_label.pack(side="left", padx=(12, 0))
 
         self.btn_wait_plus = ttk.Button(
             editor_top,
@@ -949,9 +1415,10 @@ class GamepadMacroApp:
         )
         self.btn_wait_minus.pack(side="right", padx=(4, 0))
 
-        ttk.Label(editor_top, text="全WAIT一括調整:").pack(side="right")
+        self.lbl_bulk_wait = ttk.Label(editor_top, text="全WAIT一括調整:")
+        self.lbl_bulk_wait.pack(side="right")
 
-        text_container = ttk.Frame(editor_frame)
+        text_container = ttk.Frame(self.editor_frame)
         text_container.pack(fill="both", expand=True)
 
         text_scroll = ttk.Scrollbar(text_container)
@@ -975,6 +1442,54 @@ class GamepadMacroApp:
         )
 
         self.text_area.insert("1.0", MACRO_HEADER + "\n")
+        self._saved_content = self.text_area.get("1.0", "end-1c")
+        self.text_area.bind("<KeyRelease>", self._on_editor_changed)
+
+    def _on_editor_changed(self, _event=None):
+        self._update_duration_label()
+        self._update_window_title()
+
+    def _update_duration_label(self):
+        """エディタ内の WAIT 合計から1周および全体の所要時間を計算して表示する。"""
+        if not hasattr(self, "text_area") or not hasattr(self, "duration_label"):
+            return
+        raw_text = self.text_area.get("1.0", "end-1c")
+        total_wait = 0.0
+        pattern = re.compile(r"^\s*WAIT\s+(\d+(?:\.\d+)?)\b", re.IGNORECASE)
+        for line in raw_text.splitlines():
+            clean = line.split("#", 1)[0]
+            m = pattern.match(clean)
+            if m:
+                try:
+                    total_wait += float(m.group(1))
+                except ValueError:
+                    pass
+
+        sec_str = format_duration(total_wait)
+        if self.loop_var.get():
+            raw_cnt = self.loop_count_var.get().strip()
+            try:
+                cnt = int(raw_cnt)
+            except ValueError:
+                cnt = 0
+            if cnt > 0:
+                text = self._t("duration_loop", sec=sec_str, count=cnt, total=format_duration(total_wait * cnt))
+            else:
+                text = self._t("duration_inf", sec=sec_str)
+        else:
+            text = self._t("duration_single", sec=sec_str)
+        self.duration_label.config(text=text)
+
+    def _confirm_save_if_dirty(self):
+        """未保存の変更がある場合に確認ダイアログを出す。続行可能なら True、キャンセルなら False。"""
+        if not self._is_dirty():
+            return True
+        ans = messagebox.askyesnocancel(self._t("unsaved_title"), self._t("unsaved_msg"))
+        if ans is None:
+            return False
+        if ans is True:
+            return self.save_file()
+        return True
 
     def _poll_controller_status(self):
         if self._closing_event.is_set():
@@ -983,11 +1498,11 @@ class GamepadMacroApp:
         mode = self.mode_var.get()
         pressed, detected = get_controller_state(idx, mode)
         if pressed is None:
-            self.conn_label.config(text=f"ポート {idx}: 未接続", foreground="#d9534f")
+            self.conn_label.config(text=self._t("disconnected", idx=idx), foreground="#d9534f")
         else:
-            btns = ", ".join(sorted(pressed)) if pressed else "なし"
+            btns = ", ".join(sorted(pressed)) if pressed else self._t("none_input")
             self.conn_label.config(
-                text=f"ポート {idx} [{detected}]: 接続済み (入力中: {btns})",
+                text=self._t("connected", idx=idx, detected=detected, btns=btns),
                 foreground="#28a745",
             )
         if not self._closing_event.is_set():
@@ -999,15 +1514,20 @@ class GamepadMacroApp:
             self.btn_play.config(state="disabled")
             self.btn_stop.config(state="normal")
             self.loop_count_spin.config(state="disabled")
+            self.countdown_spin.config(state="disabled")
             self.jitter_ms_spin.config(state="disabled")
             self.btn_wait_minus.config(state="disabled")
             self.btn_wait_plus.config(state="disabled")
+            self.hk_play_combo.config(state="disabled")
+            self.hk_rec_combo.config(state="disabled")
         else:
             self.btn_record.config(state="normal")
             self.btn_play.config(state="normal")
             self.btn_stop.config(state="disabled")
+            self.countdown_spin.config(state="normal")
             self._on_toggle_loop()
             self._on_toggle_jitter()
+            self._sync_hotkey_config()
             self.btn_wait_minus.config(state="normal")
             self.btn_wait_plus.config(state="normal")
 
@@ -1044,43 +1564,67 @@ class GamepadMacroApp:
         self.text_area.insert("1.0", "\n".join(new_lines) + "\n")
         self.text_area.edit_separator()
         self.text_area.yview_moveto(yview[0])
+        self._update_duration_label()
+        self._update_window_title()
 
     def start_recording(self):
         if self.is_recording or self.is_playing:
+            return
+        if not self._confirm_save_if_dirty():
             return
         idx = self.port_var.get()
         mode = self.mode_var.get()
         pressed, _ = get_controller_state(idx, mode)
         if pressed is None:
-            messagebox.showwarning("未接続", f"ポート {idx} ({mode}) にコントローラーが接続されていません。")
+            messagebox.showwarning(
+                self._t("warn_disconnected_title"),
+                self._t("warn_disconnected_msg", idx=idx, mode=mode),
+            )
             return
 
         self.is_recording = True
         self.stop_event.clear()
         self._update_buttons_state(True)
-        self.state_label.config(text="● 記録中...", foreground="#d9534f")
+        self.state_label.config(text=self._t("recording_status"), foreground="#d9534f")
 
         self.text_area.delete("1.0", tk.END)
         self.text_area.insert(tk.END, MACRO_HEADER + "\n")
+        self._update_duration_label()
+        self._update_window_title()
 
         wait_first = bool(self.wait_first_var.get())
-        t = threading.Thread(target=self._record_worker, args=(idx, mode, wait_first), daemon=True)
+        record_sticks = bool(self.record_sticks_var.get())
+        t = threading.Thread(
+            target=self._record_worker,
+            args=(idx, mode, wait_first, record_sticks),
+            daemon=True,
+        )
         self._active_worker = t
         t.start()
 
-    def _record_worker(self, idx, mode, wait_first=True):
-        prev_pressed, _ = get_controller_state(idx, mode)
+    def _record_worker(self, idx, mode, wait_first=True, record_sticks=False):
+        prev_pressed, prev_ls, prev_rs, _ = get_controller_state_full(idx, mode)
         if prev_pressed is None:
             prev_pressed = set()
+            prev_ls = (0.0, 0.0)
+            prev_rs = (0.0, 0.0)
         last_event_time = None
         started = not wait_first
         if started:
             last_event_time = time.perf_counter()
 
-        lines_buffer = []
+        def _stick_changed(prev_s, curr_s):
+            if prev_s == curr_s:
+                return False
+            if curr_s == (0.0, 0.0) and prev_s != (0.0, 0.0):
+                return True
+            return (
+                abs(curr_s[0] - prev_s[0]) >= STICK_CHANGE_THRESHOLD
+                or abs(curr_s[1] - prev_s[1]) >= STICK_CHANGE_THRESHOLD
+            )
 
         while not self.stop_event.is_set():
-            curr_pressed, _ = get_controller_state(idx, mode)
+            curr_pressed, curr_ls, curr_rs, _ = get_controller_state_full(idx, mode)
             if curr_pressed is None:
                 time.sleep(0.01)
                 continue
@@ -1088,39 +1632,48 @@ class GamepadMacroApp:
             now = time.perf_counter()
             newly_pressed = sorted(curr_pressed - prev_pressed)
             newly_released = sorted(prev_pressed - curr_pressed)
+            ls_moved = record_sticks and _stick_changed(prev_ls, curr_ls)
+            rs_moved = record_sticks and _stick_changed(prev_rs, curr_rs)
 
-            if newly_pressed or newly_released:
+            if newly_pressed or newly_released or ls_moved or rs_moved:
                 if not started:
                     started = True
                     last_event_time = now
                 else:
                     elapsed = now - last_event_time
                     if elapsed >= 0.001:
-                        line = f"WAIT {elapsed:.3f}\n"
-                        lines_buffer.append(line)
-                        self._post_ui(self._append_text, line)
+                        self._post_ui(self._append_text, f"WAIT {elapsed:.3f}\n")
                     last_event_time = now
 
                 for btn in newly_pressed:
-                    line = f"PRESS {btn}\n"
-                    lines_buffer.append(line)
-                    self._post_ui(self._append_text, line)
+                    self._post_ui(self._append_text, f"PRESS {btn}\n")
 
                 for btn in newly_released:
-                    line = f"RELEASE {btn}\n"
-                    lines_buffer.append(line)
-                    self._post_ui(self._append_text, line)
+                    self._post_ui(self._append_text, f"RELEASE {btn}\n")
+
+                if ls_moved:
+                    self._post_ui(self._append_text, f"LSTICK {curr_ls[0]:.2f} {curr_ls[1]:.2f}\n")
+                    prev_ls = curr_ls
+
+                if rs_moved:
+                    self._post_ui(self._append_text, f"RSTICK {curr_rs[0]:.2f} {curr_rs[1]:.2f}\n")
+                    prev_rs = curr_rs
 
             prev_pressed = curr_pressed
             time.sleep(0.004)  # 約250Hzポーリング
 
-        # 記録終了時に押しっぱなしのボタンがあれば自動でRELEASEを追加
-        if prev_pressed and started:
+        # 記録終了時に押しっぱなしのボタンや傾いたスティックがあれば自動で戻す
+        need_cleanup = started and (prev_pressed or (record_sticks and (prev_ls != (0.0, 0.0) or prev_rs != (0.0, 0.0))))
+        if need_cleanup:
             elapsed = time.perf_counter() - last_event_time
             if elapsed >= 0.001:
                 self._post_ui(self._append_text, f"WAIT {elapsed:.3f}\n")
             for btn in sorted(prev_pressed):
                 self._post_ui(self._append_text, f"RELEASE {btn}\n")
+            if record_sticks and prev_ls != (0.0, 0.0):
+                self._post_ui(self._append_text, "LSTICK 0.00 0.00\n")
+            if record_sticks and prev_rs != (0.0, 0.0):
+                self._post_ui(self._append_text, "RSTICK 0.00 0.00\n")
 
         self._post_ui(self._on_worker_finished)
 
@@ -1134,6 +1687,7 @@ class GamepadMacroApp:
             self.loop_count_spin.config(state="normal")
         else:
             self.loop_count_spin.config(state="disabled")
+        self._update_duration_label()
 
     def _on_toggle_jitter(self):
         if self.jitter_var.get():
@@ -1292,15 +1846,15 @@ class GamepadMacroApp:
             return
         if not self.is_admin_user:
             messagebox.showwarning(
-                "管理者権限が必要",
-                "物理パッドの再有効化には管理者権限が必要です。\nstart_macro.bat から起動し直してください。",
+                self._t("warn_admin_title"),
+                self._t("warn_admin_restore"),
             )
             return
 
         auto_swap = bool(self.auto_swap_var.get())
 
         def _worker():
-            self._set_status_async("🔄 物理パッドを復帰中...", "#007bff")
+            self._set_status_async(self._t("restoring_pad"), "#007bff")
             self._disconnect_virtual_gamepad()
             self._wait_xinput_slot0(want_connected=False, timeout=2.0, abort_on_stop=False)
             time.sleep(0.3)
@@ -1310,13 +1864,11 @@ class GamepadMacroApp:
                 self.disabled_device_ids = []
             if not auto_swap:
                 self._connect_virtual_gamepad()
-            self._set_status_async("待機中", "gray")
+            self._set_status_async(self._t("idle"), "#aaaaaa" if self.dark_mode_var.get() else "#555555")
             self._post_ui(
                 messagebox.showinfo,
-                "復帰完了",
-                f"物理コントローラーの復帰処理を実行しました（対象: {restored}件）。"
-                if restored > 0
-                else "無効化されている物理コントローラーは見つかりませんでした。",
+                self._t("restore_done_title"),
+                self._t("restore_done_msg", count=restored) if restored > 0 else self._t("restore_none_msg"),
             )
 
         t = threading.Thread(target=_worker, daemon=True)
@@ -1327,32 +1879,30 @@ class GamepadMacroApp:
         if self.is_recording or self.is_playing:
             return
         if not HAS_VGAMEPAD:
-            messagebox.showerror("再生エラー", "vgamepad ライブラリがインストールされていません。")
+            messagebox.showerror(self._t("err_play_title"), self._t("err_no_vgamepad"))
             return
 
         auto_swap = self.auto_swap_var.get()
         if auto_swap and not self.is_admin_user:
-            messagebox.showwarning(
-                "管理者権限が必要",
-                "「再生時だけ物理パッドと1Pを自動入替」を使うには管理者権限が必要です。\n\n"
-                "・start_macro.bat をダブルクリックして起動する（自動で管理者権限を要求します）\n"
-                "・またはチェックを外して再生してください。",
-            )
+            messagebox.showwarning(self._t("warn_admin_title"), self._t("warn_admin_swap"))
             return
 
         if not auto_swap and not self._connect_virtual_gamepad():
-            messagebox.showerror("再生エラー", self.vgamepad_error or "仮想コントローラーを初期化できませんでした。")
+            messagebox.showerror(
+                self._t("err_play_title"),
+                self.vgamepad_error or self._t("err_virtual_connect"),
+            )
             return
 
         raw_text = self.text_area.get("1.0", tk.END)
         try:
             commands = parse_macro_text(raw_text)
         except ValueError as e:
-            messagebox.showerror("書式エラー", str(e))
+            messagebox.showerror(self._t("err_syntax_title"), str(e))
             return
 
         if not commands:
-            messagebox.showinfo("情報", "実行できるコマンドがありません。")
+            messagebox.showinfo(self._t("info_title"), self._t("info_no_cmd"))
             return
 
         loop = self.loop_var.get()
@@ -1364,7 +1914,7 @@ class GamepadMacroApp:
                 if loop_limit < 0:
                     raise ValueError
             except ValueError:
-                messagebox.showerror("入力エラー", "ループ回数には 0 以上の整数を入力してください（0 = 無限ループ）。")
+                messagebox.showerror(self._t("err_input_title"), self._t("err_loop_count"))
                 return
 
         jitter_sec = 0.0
@@ -1376,20 +1926,35 @@ class GamepadMacroApp:
                     raise ValueError
                 jitter_sec = jitter_ms / 1000.0
             except ValueError:
-                messagebox.showerror("入力エラー", "ランダム揺らぎの幅(ms)には 0 以上の整数を入力してください。")
+                messagebox.showerror(self._t("err_input_title"), self._t("err_jitter"))
                 return
+
+        raw_cd = self.countdown_var.get().strip() or "0"
+        try:
+            countdown_sec = float(raw_cd)
+            if countdown_sec < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(self._t("err_input_title"), self._t("err_countdown"))
+            return
 
         self.is_playing = True
         self.stop_event.clear()
         self._update_buttons_state(True)
-        self.state_label.config(
-            text="🔄 1Pを仮想パッドへ切替中..." if auto_swap else "▶ 再生中...",
-            foreground="#007bff" if auto_swap else "#28a745",
-        )
+        if countdown_sec > 0:
+            self.state_label.config(
+                text=self._t("countdown_status", sec=int(countdown_sec) if countdown_sec.is_integer() else f"{countdown_sec:.1f}"),
+                foreground="#e0a800",
+            )
+        else:
+            self.state_label.config(
+                text=self._t("switching_virtual") if auto_swap else self._t("playing_status"),
+                foreground="#007bff" if auto_swap else "#28a745",
+            )
 
         t = threading.Thread(
             target=self._play_worker,
-            args=(commands, loop, loop_limit, auto_swap, jitter_sec),
+            args=(commands, loop, loop_limit, auto_swap, jitter_sec, countdown_sec),
             daemon=True,
         )
         self._active_worker = t
@@ -1411,6 +1976,8 @@ class GamepadMacroApp:
                 self.gamepad_out.release_button(button=btn_code)
             self.gamepad_out.left_trigger_float(value_float=0.0)
             self.gamepad_out.right_trigger_float(value_float=0.0)
+            self.gamepad_out.left_joystick_float(x_value_float=0.0, y_value_float=0.0)
+            self.gamepad_out.right_joystick_float(x_value_float=0.0, y_value_float=0.0)
             self.gamepad_out.update()
 
     def _highlight_line(self, line_num, loop_count=1, is_loop=False, loop_limit=0, reset_scroll=False):
@@ -1424,28 +1991,26 @@ class GamepadMacroApp:
 
         if self.auto_scroll_var.get():
             if reset_scroll:
-                # ループ開始時や先頭行実行時は先頭へ戻してから該当行を表示
                 self.text_area.yview_moveto(0.0)
                 self.text_area.see(start_idx)
             else:
-                # 下方向に余裕を持たせて自動スクロール
                 self.text_area.see(f"{line_num + 3}.0")
                 self.text_area.see(start_idx)
 
         if is_loop:
             if loop_limit > 0:
                 self.state_label.config(
-                    text=f"▶ 再生中 ({loop_count}/{loop_limit}周目 / {line_num}行目)",
+                    text=self._t("playing_loop_lim", loop=loop_count, limit=loop_limit, line=line_num),
                     foreground="#28a745",
                 )
             else:
                 self.state_label.config(
-                    text=f"▶ 再生中 ({loop_count}周目 / {line_num}行目)",
+                    text=self._t("playing_loop_inf", loop=loop_count, line=line_num),
                     foreground="#28a745",
                 )
         else:
             self.state_label.config(
-                text=f"▶ 再生中 ({line_num}行目)",
+                text=self._t("playing_line", line=line_num),
                 foreground="#28a745",
             )
 
@@ -1459,14 +2024,30 @@ class GamepadMacroApp:
             self.loop_var.set(False)
             self._on_toggle_loop()
 
-    def _play_worker(self, commands, loop, loop_limit=0, auto_swap=False, jitter_sec=0.0):
+    def _play_worker(self, commands, loop, loop_limit=0, auto_swap=False, jitter_sec=0.0, countdown_sec=0.0):
         loop_count = 0
+        swapped = False
         try:
+            # 開始前カウントダウン
+            if countdown_sec > 0:
+                deadline = time.perf_counter() + countdown_sec
+                while not self.stop_event.is_set():
+                    rem = deadline - time.perf_counter()
+                    if rem <= 0:
+                        break
+                    disp = int(rem) + 1 if rem >= 1.0 else round(rem, 1)
+                    self._set_status_async(self._t("countdown_status", sec=disp), "#e0a800")
+                    time.sleep(min(0.1, rem))
+                if self.stop_event.is_set():
+                    return
+
             if auto_swap:
+                self._set_status_async(self._t("switching_virtual"), "#007bff")
+                swapped = True
                 ok, err = self._switch_to_virtual_1p()
                 if not ok:
                     if err:
-                        self._post_ui(messagebox.showerror, "切替エラー", err)
+                        self._post_ui(messagebox.showerror, self._t("err_swap_title"), err)
                     return
 
             while not self.stop_event.is_set():
@@ -1509,6 +2090,20 @@ class GamepadMacroApp:
                             elif target in VG_BUTTON_MAP:
                                 self.gamepad_out.release_button(button=VG_BUTTON_MAP[target])
                             self.gamepad_out.update()
+                    elif cmd == "LSTICK":
+                        x, y = arg
+                        with self._vgamepad_lock:
+                            if self.gamepad_out is None:
+                                break
+                            self.gamepad_out.left_joystick_float(x_value_float=x, y_value_float=y)
+                            self.gamepad_out.update()
+                    elif cmd == "RSTICK":
+                        x, y = arg
+                        with self._vgamepad_lock:
+                            if self.gamepad_out is None:
+                                break
+                            self.gamepad_out.right_joystick_float(x_value_float=x, y_value_float=y)
+                            self.gamepad_out.update()
 
                 if not self.stop_event.is_set() and loop and loop_limit > 0:
                     remaining = max(0, loop_limit - loop_count)
@@ -1522,8 +2117,8 @@ class GamepadMacroApp:
                     self._precise_wait(random.uniform(0.0, jitter_sec))
         finally:
             self._release_all_virtual_buttons()
-            if auto_swap:
-                self._set_status_async("🔄 物理パッドを1Pへ復帰中...", "#007bff")
+            if auto_swap and swapped:
+                self._set_status_async(self._t("restoring_physical"), "#007bff")
                 self._restore_physical_1p()
                 # 自動入替ONのときは、物理パッドが未接続だった場合も仮想パッドを切断して元の状態に戻す
                 self._disconnect_virtual_gamepad()
@@ -1537,35 +2132,45 @@ class GamepadMacroApp:
         self.is_playing = False
         self._clear_highlight()
         self._update_buttons_state(False)
-        self.state_label.config(text="待機中", foreground="gray")
+        self._update_duration_label()
+        self._update_window_title()
+        self.state_label.config(
+            text=self._t("idle"),
+            foreground="#aaaaaa" if self.dark_mode_var.get() else "#555555",
+        )
 
     def save_file(self):
         if not self.current_file:
-            self.save_file_as()
-            return
+            return self.save_file_as()
         try:
             with open(self.current_file, "w", encoding="utf-8") as f:
                 f.write(self.text_area.get("1.0", tk.END))
-            self.file_label.config(text=f"現在のファイル: {self.current_file}")
-            messagebox.showinfo("保存完了", f"保存しました:\n{self.current_file}")
+            self._mark_saved()
+            self.file_label.config(text=self._t("current_file", path=self.current_file))
+            messagebox.showinfo(self._t("save_done_title"), self._t("save_done_msg", path=self.current_file))
+            return True
         except OSError as e:
-            messagebox.showerror("保存エラー", str(e))
+            messagebox.showerror(self._t("save_err_title"), str(e))
+            return False
 
     def save_file_as(self):
         path = filedialog.asksaveasfilename(
-            title="マクロファイルを保存",
+            title=self._t("dlg_save_title"),
             defaultextension=".txt",
-            filetypes=[("テキストファイル", "*.txt"), ("すべてのファイル", "*.*")],
+            filetypes=[(self._t("ft_txt"), "*.txt"), (self._t("ft_all"), "*.*")],
             initialfile=os.path.basename(self.current_file),
         )
         if path:
             self.current_file = path
-            self.save_file()
+            return self.save_file()
+        return False
 
     def load_file(self):
+        if not self._confirm_save_if_dirty():
+            return
         path = filedialog.askopenfilename(
-            title="マクロファイルを開く",
-            filetypes=[("テキストファイル", "*.txt"), ("すべてのファイル", "*.*")],
+            title=self._t("dlg_open_title"),
+            filetypes=[(self._t("ft_txt"), "*.txt"), (self._t("ft_all"), "*.*")],
         )
         if path:
             try:
@@ -1574,23 +2179,23 @@ class GamepadMacroApp:
                 self.text_area.delete("1.0", tk.END)
                 self.text_area.insert("1.0", content)
                 self.current_file = path
-                self.file_label.config(text=f"現在のファイル: {self.current_file}")
+                self.file_label.config(text=self._t("current_file", path=self.current_file))
+                self._mark_saved()
+                self._update_duration_label()
             except OSError as e:
-                messagebox.showerror("読み込みエラー", str(e))
+                messagebox.showerror(self._t("load_err_title"), str(e))
 
     def open_in_notepad(self):
         # まず現在の内容をファイルに保存してからメモ帳で開く
         if not os.path.exists(self.current_file):
             with open(self.current_file, "w", encoding="utf-8") as f:
                 f.write(self.text_area.get("1.0", tk.END))
+            self._mark_saved()
         else:
-            if messagebox.askyesno(
-                "メモ帳で開く",
-                "現在のエディタ内容をファイルに上書き保存してからメモ帳で開きますか？\n"
-                "（「いいえ」を選ぶと、ディスクに保存済みのファイルをそのまま開きます）",
-            ):
+            if messagebox.askyesno(self._t("notepad_title"), self._t("notepad_msg")):
                 with open(self.current_file, "w", encoding="utf-8") as f:
                     f.write(self.text_area.get("1.0", tk.END))
+                self._mark_saved()
         subprocess.Popen(["notepad.exe", self.current_file])
 
     def _on_toggle_keep_awake(self):
@@ -1611,6 +2216,8 @@ class GamepadMacroApp:
                 pass
 
     def _on_close(self):
+        if not self._confirm_save_if_dirty():
+            return
         self._save_window_state()
         self._closing_event.set()
         self.stop_event.set()
