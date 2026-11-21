@@ -88,7 +88,7 @@ LSTICK 0.00 0.00
 - DirectInput コントローラーでも **ボタンと十字キーの記録・再生** は可能ですが、以下の制限があります：
   - 再生時は **仮想 Xbox 360 コントローラー（XInput）に変換して出力** されます。
   - メーカーや機種によってボタン番号（`BTN1`〜`BTN12`）の割り当てが異なるため、A/B や X/Y が入れ替わって再生される場合があります。その場合はテキスト上の `BTN1` などを `A` 等に書き換えて調整してください。
-  - `BTN13` 以降のボタンおよびアナログスティック入力は記録・再生の対象外です。
+  - `BTN13` 以降のボタンは再生時は無視されます（アナログスティックは機種によって軸の割り当てが異なる場合があります）。
   - 「1P自動入替」は XInput ポート 0 を基準に動作するため、DirectInput 専用パッドでは物理パッドの無効化は行われず、仮想 Xbox 360 パッドがそのまま XInput 1P として接続されます。
   - 「自動電源オフ防止」は XInput 振動 API を使用しているため、DirectInput 専用パッドには効きません。
 
@@ -99,6 +99,19 @@ LSTICK 0.00 0.00
 - 本ツールは **オフライン環境での検証・個人用途** を想定して作成されています。
 - **オンラインゲームなど、利用規約で外部ツールや自動操作（マクロ）が禁止されているソフトウェアでは使用しないでください。** アカウント停止等の不利益が生じても作者は一切の責任を負いません。
 - 本ツールの使用によって生じた機器・ソフトウェア・データ等のいかなる損害についても、すべて利用者の自己責任となります。
+
+### ファイル構成
+
+- `gamepad_macro.py` : アプリ本体
+- `i18n.py` : 10か国語 GUI 翻訳テーブル
+- `start_macro.bat` : 管理者権限での起動用バッチファイル
+- `sample_macro.txt` : サンプルマクロ
+- `requirements.txt` : 依存パッケージ一覧
+- `LICENSE` : MIT License
+
+### ライセンス
+
+[MIT License](LICENSE)
 
 ---
 
@@ -172,7 +185,7 @@ You can easily restore it using any of the following methods:
 
 1. **Relaunch the tool (Easiest)**  
    Start the tool as Administrator via `start_macro.bat`. It will automatically detect any disabled physical controller on startup and prompt you to re-enable it.
-2. **Click the "🔄 物理パッドを戻す" (Restore Physical Pad) button**  
+2. **Click the "🔄 Restore Physical Pad" button**  
    Click the restore button on the right side of the control panel (requires Administrator privileges).
 3. **Re-enable manually in Windows Device Manager**  
    - Right-click the Start button → open **Device Manager**.
@@ -186,7 +199,7 @@ You can easily restore it using any of the following methods:
 - DirectInput controllers can record and play back **buttons and D-pad**, with the following limitations:
   - Playback is always output through a **virtual Xbox 360 (XInput) controller**.
   - Because `BTN1`–`BTN12` mappings vary by manufacturer, buttons such as A/B or X/Y may be swapped during playback. You can edit the text file (e.g., replace `BTN1` with `A`) to adjust mappings.
-  - `BTN13` and above, as well as analog sticks, are not supported.
+  - `BTN13` and above are ignored during playback (analog stick axis assignments may also vary by controller model).
   - **Auto 1P Swap** monitors XInput slot 0, so DirectInput-only controllers are not disabled; the virtual Xbox 360 controller simply connects as XInput Player 1.
   - **Auto-Sleep Prevention** uses the XInput vibration API and does not affect DirectInput-only controllers.
 
@@ -197,3 +210,16 @@ You can easily restore it using any of the following methods:
 - This tool is intended for **offline testing and personal use**.
 - **Do not use this tool in online games or software whose Terms of Service prohibit external tools or automation/macros.** The author is not responsible for account bans or any other penalties.
 - Use this software at your own risk. The author assumes no liability for any damage to hardware, software, or data resulting from its use.
+
+### Project Structure
+
+- `gamepad_macro.py` : Main application
+- `i18n.py` : 10-language GUI translation table
+- `start_macro.bat` : Launcher batch script with Administrator elevation
+- `sample_macro.txt` : Sample macro file
+- `requirements.txt` : Python dependencies
+- `LICENSE` : MIT License
+
+### License
+
+[MIT License](LICENSE)
