@@ -1,0 +1,19 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local user state & personal macro recordings
+window_state.json
+*.txt
+!requirements.txt
+!sample_macro.txt
+
+# Bundled third-party library (install via requirements.txt instead)
+vgamepad/
+
+# Virtual environments & IDE
+.venv/
+venv/
+.vscode/
+.idea/

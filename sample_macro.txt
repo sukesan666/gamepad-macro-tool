@@ -1,0 +1,54 @@
+# ==========================================
+# ゲームパッド マクロ記録ファイル
+# ==========================================
+# 書式 (メモ帳などで自由に編集・調整できます):
+#   WAIT <秒数>        ... 指定した秒数だけ待機 (例: WAIT 0.500)
+#   PRESS <ボタン名>   ... ボタンを押す (例: PRESS A)
+#   RELEASE <ボタン名> ... ボタンを離す (例: RELEASE A)
+#
+# 使用可能なボタン名:
+#   A, B, X, Y, UP, DOWN, LEFT, RIGHT,
+#   LB, RB, LT, RT, LS, RS, START, BACK
+# ==========================================
+
+WAIT 1.193
+PRESS B
+WAIT 0.158
+RELEASE B
+WAIT 0.489
+PRESS B
+WAIT 0.166
+RELEASE B
+WAIT 1.561
+PRESS LT
+WAIT 1.089
+PRESS A
+WAIT 0.152
+RELEASE A
+WAIT 2.000
+RELEASE LT
+WAIT 11.006
+PRESS B
+WAIT 0.177
+RELEASE B
+WAIT 0.176
+PRESS B
+WAIT 0.154
+RELEASE B
+WAIT 0.517
+PRESS LT
+WAIT 1.545
+PRESS A
+WAIT 0.130
+RELEASE A
+WAIT 0.848
+RELEASE LT
+WAIT 12.517
+PRESS B
+WAIT 0.136
+RELEASE B
+WAIT 0.377
+PRESS B
+WAIT 0.162
+RELEASE B
+
