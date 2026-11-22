@@ -716,7 +716,7 @@ class GamepadMacroApp:
 
     def _is_dirty(self):
         try:
-            return self.text_area.get("1.0", "end-1c") != self._saved_content.rstrip("\n")
+            return self.text_area.get("1.0", "end-1c") != self._saved_content
         except Exception:
             return False
 
@@ -2144,7 +2144,7 @@ class GamepadMacroApp:
             return self.save_file_as()
         try:
             with open(self.current_file, "w", encoding="utf-8") as f:
-                f.write(self.text_area.get("1.0", tk.END))
+                f.write(self.text_area.get("1.0", "end-1c"))
             self._mark_saved()
             self.file_label.config(text=self._t("current_file", path=self.current_file))
             messagebox.showinfo(self._t("save_done_title"), self._t("save_done_msg", path=self.current_file))
@@ -2189,12 +2189,12 @@ class GamepadMacroApp:
         # まず現在の内容をファイルに保存してからメモ帳で開く
         if not os.path.exists(self.current_file):
             with open(self.current_file, "w", encoding="utf-8") as f:
-                f.write(self.text_area.get("1.0", tk.END))
+                f.write(self.text_area.get("1.0", "end-1c"))
             self._mark_saved()
         else:
             if messagebox.askyesno(self._t("notepad_title"), self._t("notepad_msg")):
                 with open(self.current_file, "w", encoding="utf-8") as f:
-                    f.write(self.text_area.get("1.0", tk.END))
+                    f.write(self.text_area.get("1.0", "end-1c"))
                 self._mark_saved()
         subprocess.Popen(["notepad.exe", self.current_file])
 
